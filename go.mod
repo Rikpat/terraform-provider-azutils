@@ -1,6 +1,6 @@
 module github.com/rikpat/terraform-provider-azutils
 
-go 1.25.5
+go 1.25.8
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.0
