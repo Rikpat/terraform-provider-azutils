@@ -134,7 +134,7 @@ func selectCredentials(ctx context.Context, in *[]types.String, data *AzUtilsPro
 				clientID = props.ClientID
 				tenantID = props.TenantID
 				serviceConnectionID = props.ServiceConnectionID
-				systemAccessToken = props.ServiceConnectionID
+				systemAccessToken = props.SystemAccessToken
 			}
 			cred, err = azidentity.NewAzurePipelinesCredential(
 				tenantID,
