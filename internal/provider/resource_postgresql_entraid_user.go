@@ -243,10 +243,10 @@ func (r *postgresqlEntraIDUserResource) Read(ctx context.Context, req resource.R
 	var exists bool
 	if err = db.QueryRow(
 		ctx,
-		"SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1",
+		"SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1)",
 		pgx.Identifier{data.User.Name.ValueString()}.Sanitize(),
 	).Scan(&exists); err != nil {
-		resp.Diagnostics.AddError("Unable to check PostgreSQL role existence", err.Error())
+		resp.Diagnostics.AddError(fmt.Sprintf("Unable to check PostgreSQL role existence for user %q", data.User.Name.ValueString()), err.Error())
 		return
 	}
 
