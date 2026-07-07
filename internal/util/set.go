@@ -13,23 +13,28 @@ type exists = struct{}
 // StringSet is a set of strings represented as a map with empty struct values.
 type StringSet map[string]exists
 
-func ParseStringSet(tfSet types.Set) *StringSet {
+func ParseStringSet(tfSet types.Set) (*StringSet, diag.Diagnostics) {
 	if tfSet.IsNull() || tfSet.IsUnknown() {
-		return &StringSet{}
+		return &StringSet{}, nil
 	}
 
 	goSet := make(StringSet, tfSet.Length(basetypes.CollectionLengthOptions{}))
+	diags := diag.Diagnostics{}
 
 	for _, el := range tfSet.Elements() {
 		// Type should be checked by the framework
-		sv := el.(basetypes.StringValue)
+		sv, ok := el.(basetypes.StringValue)
+		if !ok {
+			diags.AddError("Invalid set element type", "Expected a string value in the set, but got a different type.")
+			continue
+		}
 		if sv.IsNull() || sv.IsUnknown() {
 			continue
 		}
 		goSet[sv.ValueString()] = exists{}
 	}
 
-	return &goSet
+	return &goSet, nil
 }
 
 func (current *StringSet) Diff(expected *StringSet) (*StringSet, *StringSet) {

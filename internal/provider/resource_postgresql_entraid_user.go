@@ -211,7 +211,13 @@ func (r *postgresqlEntraIDUserResource) Create(ctx context.Context, req resource
 		return
 	}
 
-	if err = r.grantGlobalRoles(ctx, db, data.User.Name.ValueString(), util.ParseStringSet(data.User.GlobalRoles)); err != nil {
+	expectedRoles, diags := util.ParseStringSet(data.User.GlobalRoles)
+	if diags.HasError() {
+		resp.Diagnostics.Append(diags...)
+		return
+	}
+
+	if err = r.grantGlobalRoles(ctx, db, data.User.Name.ValueString(), expectedRoles); err != nil {
 		resp.Diagnostics.AddError("Unable to assign PostgreSQL global roles", err.Error())
 		return
 	}
@@ -249,7 +255,13 @@ func (r *postgresqlEntraIDUserResource) Read(ctx context.Context, req resource.R
 		return
 	}
 
-	activeRoles, err := r.checkActiveRoles(ctx, db, data.User.Name.ValueString(), util.ParseStringSet(data.User.GlobalRoles))
+	expectedRoles, diags := util.ParseStringSet(data.User.GlobalRoles)
+	if diags.HasError() {
+		resp.Diagnostics.Append(diags...)
+		return
+	}
+
+	activeRoles, err := r.checkActiveRoles(ctx, db, data.User.Name.ValueString(), expectedRoles)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check active PostgreSQL roles", err.Error())
 		return
@@ -285,8 +297,18 @@ func (r *postgresqlEntraIDUserResource) Update(ctx context.Context, req resource
 	}
 	defer db.Close(ctx)
 
-	previousRoles := util.ParseStringSet(state.User.GlobalRoles)
-	expectedRoles := util.ParseStringSet(plan.User.GlobalRoles)
+	previousRoles, diags := util.ParseStringSet(state.User.GlobalRoles)
+	if diags.HasError() {
+		resp.Diagnostics.Append(diags...)
+		return
+	}
+
+	expectedRoles, diags := util.ParseStringSet(plan.User.GlobalRoles)
+	if diags.HasError() {
+		resp.Diagnostics.Append(diags...)
+		return
+	}
+
 	missingRoles, extraRoles := previousRoles.Diff(expectedRoles)
 
 	if err := r.grantGlobalRoles(ctx, db, plan.User.Name.ValueString(), missingRoles); err != nil {
