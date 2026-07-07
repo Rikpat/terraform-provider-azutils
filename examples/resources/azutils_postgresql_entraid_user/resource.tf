@@ -12,6 +12,8 @@ resource "azutils_postgresql_entraid_user" "example" {
     name        = "app-reader"
     object_id   = "11111111-2222-3333-4444-555555555555"
     object_type = "service"
-    is_admin    = false
+    global_roles = [
+      "pg_read_all_data",
+    ]
   }
 }

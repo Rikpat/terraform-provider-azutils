@@ -3,12 +3,12 @@
 page_title: "azutils_postgresql_entraid_user Resource - azutils"
 subcategory: ""
 description: |-
-  Creates a PostgreSQL Role for EntraID user, group or service principal. Can create a global admin, but rest of the permissions should be managed using a different postgresql specific provider (using ephemeral token for password).
+  Creates a PostgreSQL Role for EntraID user, group or service principal and manages globally granted PostgreSQL roles.
 ---
 
 # azutils_postgresql_entraid_user (Resource)
 
-Creates a PostgreSQL Role for EntraID user, group or service principal. Can create a global admin, but rest of the permissions should be managed using a different postgresql specific provider (using ephemeral token for password).
+Creates a PostgreSQL Role for EntraID user, group or service principal and manages globally granted PostgreSQL roles.
 
 ## Example Usage
 
@@ -27,7 +27,9 @@ resource "azutils_postgresql_entraid_user" "example" {
     name        = "app-reader"
     object_id   = "11111111-2222-3333-4444-555555555555"
     object_type = "service"
-    is_admin    = false
+    global_roles = [
+      "pg_read_all_data",
+    ]
   }
 }
 ```
@@ -63,6 +65,6 @@ Required:
 
 Optional:
 
-- `is_admin` (Boolean) Whether the user is an admin. Default is `false`. If you want to create an admin user, you should probably use `azurerm_postgresql_flexible_server_active_directory_administrator`, this does the same thing on database end intead of azure end.
+- `global_roles` (Set of String) The global roles assigned to the user. Valid values include `pg_read_all_data`, `azure_pg_admin`, etc. Some PostgreSQL roles (ex. pg_write_all_data) are not supported by Azure PostgreSQL and will fail when assigned.
 - `object_id` (String) The EntraID Object ID of the user, group or service principal. If set, `name` can be different from the actual name in EntraID, for example you can use service principal client id to not have to store actual name of principal anywhere. If set, also requires `object_type` to be set.
 - `object_type` (String) The EntraID Object Type of the user, group or service principal. Is required if `object_id` is set. Valid values are `user`, `group` and `service`.

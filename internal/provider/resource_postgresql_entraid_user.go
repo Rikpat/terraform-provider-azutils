@@ -8,12 +8,12 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/jackc/pgx/v5"
+	"github.com/rikpat/terraform-provider-azutils/internal/util"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int32default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -34,10 +34,10 @@ type postgresqlEntraIDUserServerModel struct {
 }
 
 type postgresqlEntraIDUserUserModel struct {
-	Name       types.String `tfsdk:"name"`
-	ObjectID   types.String `tfsdk:"object_id"`
-	ObjectType types.String `tfsdk:"object_type"`
-	IsAdmin    types.Bool   `tfsdk:"is_admin"`
+	Name        types.String `tfsdk:"name"`
+	ObjectID    types.String `tfsdk:"object_id"`
+	ObjectType  types.String `tfsdk:"object_type"`
+	GlobalRoles types.Set    `tfsdk:"global_roles"`
 }
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -81,7 +81,7 @@ func (r *postgresqlEntraIDUserResource) Configure(_ context.Context, req resourc
 // Schema defines the schema for the resource.
 func (r *postgresqlEntraIDUserResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Creates a PostgreSQL Role for EntraID user, group or service principal. Can create a global admin, but rest of the permissions should be managed using a different postgresql specific provider (using ephemeral token for password).",
+		Description: "Creates a PostgreSQL Role for EntraID user, group or service principal and manages globally granted PostgreSQL roles.",
 		Attributes: map[string]schema.Attribute{
 			"server": schema.SingleNestedAttribute{
 				MarkdownDescription: "The PostgreSQL server connection details.",
@@ -139,11 +139,10 @@ func (r *postgresqlEntraIDUserResource) Schema(_ context.Context, _ resource.Sch
 							stringvalidator.AlsoRequires(path.MatchRoot("user").AtName("object_id")),
 						},
 					},
-					"is_admin": schema.BoolAttribute{
-						MarkdownDescription: "Whether the user is an admin. Default is `false`. If you want to create an admin user, you should probably use `azurerm_postgresql_flexible_server_active_directory_administrator`, this does the same thing on database end intead of azure end.",
+					"global_roles": schema.SetAttribute{
+						ElementType:         types.StringType,
+						MarkdownDescription: "The global roles assigned to the user. Valid values include `pg_read_all_data`, `azure_pg_admin`, etc. Some PostgreSQL roles (ex. pg_write_all_data) are not supported by Azure PostgreSQL and will fail when assigned.",
 						Optional:            true,
-						Computed:            true,
-						Default:             booldefault.StaticBool(false),
 					},
 				},
 			},
@@ -194,7 +193,7 @@ func (r *postgresqlEntraIDUserResource) Create(ctx context.Context, req resource
 			data.User.Name.ValueString(),
 			objectID,
 			strings.ToLower(data.User.ObjectType.ValueString()),
-			data.User.IsAdmin.ValueBool(),
+			false,
 			false,
 		)
 	} else {
@@ -202,13 +201,18 @@ func (r *postgresqlEntraIDUserResource) Create(ctx context.Context, req resource
 			ctx,
 			"SELECT pgaadauth_create_principal($1, $2, $3);",
 			data.User.Name.ValueString(),
-			data.User.IsAdmin.ValueBool(),
+			false,
 			false,
 		)
 	}
 
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create Entra ID PostgreSQL user", err.Error())
+		return
+	}
+
+	if err = r.grantGlobalRoles(ctx, db, data.User.Name.ValueString(), util.ParseStringSet(data.User.GlobalRoles)); err != nil {
+		resp.Diagnostics.AddError("Unable to assign PostgreSQL global roles", err.Error())
 		return
 	}
 
@@ -245,18 +249,19 @@ func (r *postgresqlEntraIDUserResource) Read(ctx context.Context, req resource.R
 		return
 	}
 
-	// Get Admin role membership status as this is the only attribute that does not cause a recreation
-	var isAdmin bool
-	if err = db.QueryRow(
-		ctx,
-		"SELECT pg_has_role($1, $2, 'member');",
-		pgx.Identifier{data.User.Name.ValueString()}.Sanitize(),
-		pgx.Identifier{"azure_pg_admin"}.Sanitize(),
-	).Scan(&isAdmin); err != nil {
-		resp.Diagnostics.AddError("Unable to query PostgreSQL role admin status", err.Error())
+	activeRoles, err := r.checkActiveRoles(ctx, db, data.User.Name.ValueString(), util.ParseStringSet(data.User.GlobalRoles))
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to check active PostgreSQL roles", err.Error())
 		return
 	}
-	data.User.IsAdmin = types.BoolValue(isAdmin)
+
+	activeRolesSet, diag := activeRoles.ToSetValue()
+	resp.Diagnostics.Append(diag...)
+	if diag.HasError() {
+		return
+	}
+
+	data.User.GlobalRoles = activeRolesSet
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -280,26 +285,35 @@ func (r *postgresqlEntraIDUserResource) Update(ctx context.Context, req resource
 	}
 	defer db.Close(ctx)
 
-	// Update admin role membership if it has changed
-	if state.User.IsAdmin.ValueBool() != plan.User.IsAdmin.ValueBool() {
-		query := "REVOKE $1 FROM $2"
-		if plan.User.IsAdmin.ValueBool() {
-			query = "GRANT $1 TO $2"
-		}
+	previousRoles := util.ParseStringSet(state.User.GlobalRoles)
+	expectedRoles := util.ParseStringSet(plan.User.GlobalRoles)
+	missingRoles, extraRoles := previousRoles.Diff(expectedRoles)
 
-		_, err = db.Exec(
-			ctx,
-			query,
-			pgx.Identifier{"azure_pg_admin"}.Sanitize(),
-			pgx.Identifier{plan.User.Name.ValueString()}.Sanitize(),
-		)
-
-		if err != nil {
-			resp.Diagnostics.AddError("Unable to update PostgreSQL admin role membership", err.Error())
-			return
-		}
+	if err := r.grantGlobalRoles(ctx, db, plan.User.Name.ValueString(), missingRoles); err != nil {
+		resp.Diagnostics.AddError("Unable to update PostgreSQL user", fmt.Sprintf("failed to grant roles to user %q: %v", plan.User.Name.ValueString(), err))
 	}
 
+	if err := r.revokeGlobalRoles(ctx, db, plan.User.Name.ValueString(), extraRoles); err != nil {
+		resp.Diagnostics.AddError("Unable to update PostgreSQL user", fmt.Sprintf("failed to revoke roles from user %q: %v", plan.User.Name.ValueString(), err))
+	}
+
+	// If something failed, we need to check which roles were updated and update the state accordingly. We do this by reading the current state of the user again.
+	if resp.Diagnostics.HasError() {
+		// Needs both previous and expected roles to check which roles are actually active in PostgreSQL.
+		activeRoles, err := r.checkActiveRoles(ctx, db, plan.User.Name.ValueString(), previousRoles.Union(expectedRoles))
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to check active PostgreSQL roles", err.Error())
+			return
+		}
+		activeRolesSet, diag := activeRoles.ToSetValue()
+		resp.Diagnostics.Append(diag...)
+		if diag.HasError() {
+			return
+		}
+		plan.User.GlobalRoles = activeRolesSet
+	}
+
+	// If grant or revoke failed, we still want to update the state to reflect the actual roles in PostgreSQL, so we read the current state again.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -326,6 +340,55 @@ func (r *postgresqlEntraIDUserResource) Delete(ctx context.Context, req resource
 	}
 
 	resp.State.RemoveResource(ctx)
+}
+
+func (r *postgresqlEntraIDUserResource) grantGlobalRoles(ctx context.Context, db *pgx.Conn, username string, roles *util.StringSet) error {
+	query := ""
+	for role := range *roles {
+		query += fmt.Sprintf("GRANT %s TO %s;\n", pgx.Identifier{role}.Sanitize(), pgx.Identifier{username}.Sanitize())
+	}
+	_, err := db.Exec(ctx, query)
+	return err
+}
+
+func (r *postgresqlEntraIDUserResource) revokeGlobalRoles(ctx context.Context, db *pgx.Conn, username string, roles *util.StringSet) error {
+	query := ""
+	for role := range *roles {
+		query += fmt.Sprintf("REVOKE %s FROM %s;\n", pgx.Identifier{role}.Sanitize(), pgx.Identifier{username}.Sanitize())
+	}
+	_, err := db.Exec(ctx, query)
+	return err
+}
+
+func (r *postgresqlEntraIDUserResource) checkActiveRoles(ctx context.Context, db *pgx.Conn, username string, roles *util.StringSet) (*util.StringSet, error) {
+	activeRoles := make(util.StringSet, 0)
+	if len(*roles) > 0 {
+		rows, err := db.Query(
+			ctx,
+			`SELECT configured.role
+			FROM unnest($2::text[]) AS configured(role)
+			WHERE pg_has_role($1, configured.role, 'member')`,
+			username,
+			roles.ToList(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query role memberships for user %q: %v", username, err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var role string
+			if err := rows.Scan(&role); err != nil {
+				return nil, fmt.Errorf("failed to scan role membership row for user %q: %v", username, err)
+			}
+			activeRoles.Add(role)
+		}
+
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("failed while reading role memberships for user %q: %v", username, err)
+		}
+	}
+	return &activeRoles, nil
 }
 
 func (r *postgresqlEntraIDUserResource) openDB(ctx context.Context, data postgresqlEntraIDUserModel) (*pgx.Conn, error) {
