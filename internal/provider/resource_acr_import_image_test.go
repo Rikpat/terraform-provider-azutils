@@ -46,7 +46,10 @@ func TestImportImageSchemaValidators(t *testing.T) {
 		{"destination_registry_url", "https://example.azurecr.io/repo", false},
 	} {
 		t.Run(test.attribute+"="+test.value, func(t *testing.T) {
-			attribute := schemaResponse.Schema.Attributes[test.attribute].(schema.StringAttribute)
+			attribute, ok := schemaResponse.Schema.Attributes[test.attribute].(schema.StringAttribute)
+			if !ok {
+				t.Fatalf("attribute %q is not a string attribute", test.attribute)
+			}
 			var diagnostics validator.StringResponse
 			for _, check := range attribute.Validators {
 				check.ValidateString(ctx, validator.StringRequest{

@@ -183,7 +183,7 @@ func (r *acrImportImageResource) copyImage(ctx context.Context, destination stri
 		return fmt.Errorf("parse target image: %w", err)
 	}
 
-	sourceAuth := authn.Authenticator(authn.Anonymous)
+	sourceAuth := authn.Anonymous
 	if !data.SourcePassword.IsNull() && data.SourcePassword.ValueString() != "" {
 		password := data.SourcePassword.ValueString()
 		username := data.SourceUsername.ValueString()
