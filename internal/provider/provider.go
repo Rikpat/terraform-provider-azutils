@@ -200,6 +200,7 @@ func (p *AzUtilsProvider) Configure(ctx context.Context, req provider.ConfigureR
 func (p *AzUtilsProvider) Resources(ctx context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewPostgresqlEntraIDUser,
+		NewACRImportImageResource,
 	}
 }
 
