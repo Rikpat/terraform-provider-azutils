@@ -41,9 +41,9 @@ func TestImportImageSchemaValidators(t *testing.T) {
 		{"target_image", "team/image:v1", true},
 		{"target_image", "team/image", false},
 		{"target_image", "team/image@sha256:" + strings.Repeat("a", 64), false},
-		{"destination_registry_url", "example.azurecr.io", true},
-		{"destination_registry_url", "https://example.azurecr.io", false},
-		{"destination_registry_url", "https://example.azurecr.io/repo", false},
+		{"target_registry", "example.azurecr.io", true},
+		{"target_registry", "https://example.azurecr.io", false},
+		{"target_registry", "https://example.azurecr.io/repo", false},
 	} {
 		t.Run(test.attribute+"="+test.value, func(t *testing.T) {
 			attribute, ok := schemaResponse.Schema.Attributes[test.attribute].(schema.StringAttribute)
@@ -191,7 +191,24 @@ func TestImageExists(t *testing.T) {
 }
 
 func TestDeleteImage(t *testing.T) {
-	server := httptest.NewServer(registry.New())
+	registryHandler := registry.New()
+	var deletedReference string
+	deleted := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if deleted && r.Method == http.MethodHead && strings.HasSuffix(r.URL.Path, "/manifests/v1") {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			deletedReference = r.URL.Path
+			if strings.HasSuffix(r.URL.Path, ":v1") {
+				http.Error(w, "UNSUPPORTED: A manifest can only be deleted by digest.", http.StatusMethodNotAllowed)
+				return
+			}
+			deleted = true
+		}
+		registryHandler.ServeHTTP(w, r)
+	}))
 	defer server.Close()
 	host := strings.TrimPrefix(server.URL, "http://")
 	ref, err := name.ParseReference(host+"/delete:v1", name.Insecure)
@@ -208,6 +225,9 @@ func TestDeleteImage(t *testing.T) {
 
 	if err := deleteImage(context.Background(), ref, authn.Anonymous); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(deletedReference, "/manifests/sha256:") {
+		t.Fatalf("deleted reference %q is not a digest", deletedReference)
 	}
 	if exists, err := imageExists(context.Background(), ref, authn.Anonymous); err != nil || exists {
 		t.Fatalf("image exists after deletion: exists=%t err=%v", exists, err)

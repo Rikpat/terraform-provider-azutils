@@ -50,15 +50,15 @@ type acrImportImageResource struct {
 }
 
 type acrImportImageModel struct {
-	ID                     types.String `tfsdk:"id"`
-	SourceRegistry         types.String `tfsdk:"source_registry"`
-	SourceImage            types.String `tfsdk:"source_image"`
-	SourceUsername         types.String `tfsdk:"source_username"`
-	SourcePassword         types.String `tfsdk:"source_password"`
-	DestinationRegistryURL types.String `tfsdk:"destination_registry_url"`
-	TargetImage            types.String `tfsdk:"target_image"`
-	RemoveOnDelete         types.Bool   `tfsdk:"remove_on_delete"`
-	Revision               types.String `tfsdk:"revision"`
+	ID             types.String `tfsdk:"id"`
+	SourceRegistry types.String `tfsdk:"source_registry"`
+	SourceImage    types.String `tfsdk:"source_image"`
+	SourceUsername types.String `tfsdk:"source_username"`
+	SourcePassword types.String `tfsdk:"source_password"`
+	TargetRegistry types.String `tfsdk:"target_registry"`
+	TargetImage    types.String `tfsdk:"target_image"`
+	RemoveOnDelete types.Bool   `tfsdk:"remove_on_delete"`
+	Revision       types.String `tfsdk:"revision"`
 }
 
 func (r *acrImportImageResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -108,7 +108,7 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 					stringvalidator.LengthAtLeast(1),
 				},
 			},
-			"destination_registry_url": schema.StringAttribute{
+			"target_registry": schema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "Destination Azure Container Registry login host without a scheme, for example `example.azurecr.io`.",
 				PlanModifiers:       replace,
@@ -162,7 +162,7 @@ func (r *acrImportImageResource) Create(ctx context.Context, req resource.Create
 		return
 	}
 
-	destination := data.DestinationRegistryURL.ValueString()
+	destination := data.TargetRegistry.ValueString()
 	if err := r.copyImage(ctx, destination, data); err != nil {
 		resp.Diagnostics.AddError("Could not copy image into ACR", err.Error())
 		return
@@ -290,7 +290,7 @@ func (r *acrImportImageResource) Read(ctx context.Context, req resource.ReadRequ
 		return
 	}
 
-	loginServer := data.DestinationRegistryURL.ValueString()
+	loginServer := data.TargetRegistry.ValueString()
 	ref, err := name.ParseReference(loginServer + "/" + data.TargetImage.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid target image", err.Error())
@@ -340,15 +340,24 @@ func imageExists(ctx context.Context, ref name.Reference, auth authn.Authenticat
 }
 
 func deleteImage(ctx context.Context, ref name.Reference, auth authn.Authenticator) error {
-	err := remote.Delete(ref, remote.WithContext(ctx), remote.WithAuth(auth))
-	if err == nil {
-		return nil
-	}
+	options := []remote.Option{remote.WithContext(ctx), remote.WithAuth(auth)}
+	descriptor, err := remote.Head(ref, options...)
 	var registryErr *transport.Error
 	if errors.As(err, &registryErr) && registryErr.StatusCode == http.StatusNotFound {
 		return nil
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("resolve target image digest: %w", err)
+	}
+
+	digestRef := ref.Context().Digest(descriptor.Digest.String())
+	if err := remote.Delete(digestRef, options...); err != nil {
+		if errors.As(err, &registryErr) && registryErr.StatusCode == http.StatusNotFound {
+			return nil
+		}
+		return fmt.Errorf("delete target image digest %s: %w", descriptor.Digest, err)
+	}
+	return nil
 }
 
 func (r *acrImportImageResource) Update(_ context.Context, _ resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -364,7 +373,7 @@ func (r *acrImportImageResource) Delete(ctx context.Context, req resource.Delete
 		return
 	}
 
-	loginServer := data.DestinationRegistryURL.ValueString()
+	loginServer := data.TargetRegistry.ValueString()
 	ref, err := name.ParseReference(loginServer + "/" + data.TargetImage.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid target image", err.Error())
