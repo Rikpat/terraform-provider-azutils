@@ -17,6 +17,11 @@ import (
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
+type configuredProviderData struct {
+	credential *azidentity.ChainedTokenCredential
+	cloud      cloud.Configuration
+}
+
 // Select cloud configuration based on the input string, display warning to user if it's not recognized.
 func selectCloud(c string) (cloud.Configuration, diag.Diagnostic) {
 	switch c {
@@ -201,7 +206,7 @@ func selectCredentials(ctx context.Context, in *[]types.String, data *AzUtilsPro
 	return out, diags
 }
 
-func setupCredentialChain(ctx context.Context, data *AzUtilsProviderModel) (*azidentity.ChainedTokenCredential, diag.Diagnostics) {
+func setupCredentialChain(ctx context.Context, data *AzUtilsProviderModel) (*configuredProviderData, diag.Diagnostics) {
 	// Get credential types to use
 	credentialTypes := make([]types.String, 0, len(data.Credentials.Elements()))
 	diags := data.Credentials.ElementsAs(ctx, &credentialTypes, false)
@@ -217,5 +222,5 @@ func setupCredentialChain(ctx context.Context, data *AzUtilsProviderModel) (*azi
 	if err != nil {
 		diags.AddError("Failed setting up credential chain", err.Error())
 	}
-	return cred, diags
+	return &configuredProviderData{credential: cred, cloud: cloud}, diags
 }

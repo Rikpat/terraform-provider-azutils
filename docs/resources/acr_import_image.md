@@ -3,12 +3,12 @@
 page_title: "azutils_acr_import_image Resource - azutils"
 subcategory: ""
 description: |-
-  Copies one tagged image into an Azure Container Registry by pulling and pushing through the Terraform provider. Requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-copies it if missing. By default, removing this resource from Terraform state does not delete the image; set remove_on_delete to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.
+  Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set remove_on_delete to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.
 ---
 
 # azutils_acr_import_image (Resource)
 
-Copies one tagged image into an Azure Container Registry by pulling and pushing through the Terraform provider. Requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-copies it if missing. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.
+Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.
 
 ## Example Usage
 
@@ -18,12 +18,13 @@ ephemeral "azutils_token" "source" {
 }
 
 resource "azutils_acr_import_image" "example" {
-  source_registry  = "sourceregistry.azurecr.io"
-  source_image     = "myimage:v1"
-  source_password  = ephemeral.azutils_token.source.token
-  target_registry  = "destregistry.azurecr.io"
-  target_image     = "myimage:v1"
-  remove_on_delete = true
+  source_registry    = "sourceregistry.azurecr.io"
+  source_image       = "myimage:v1"
+  source_password    = ephemeral.azutils_token.source.token
+  target_registry_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/example/providers/Microsoft.ContainerRegistry/registries/destregistry"
+  target_image       = "myimage:v1"
+  force              = true
+  remove_on_delete   = true
 }
 ```
 
@@ -35,12 +36,13 @@ resource "azutils_acr_import_image" "example" {
 - `source_image` (String) Source repository and tag or digest, for example `app:v1` or `app@sha256:...`.
 - `source_registry` (String) Source registry host, for example `example.azurecr.io` or `docker.io` (without a scheme).
 - `target_image` (String) Destination repository and tag, for example `app:v1`.
-- `target_registry` (String) Destination Azure Container Registry login host without a scheme, for example `example.azurecr.io`.
+- `target_registry_id` (String) Azure resource ID of the target registry.
 
 ### Optional
 
 > **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
 
+- `force` (Boolean) Overwrite the target tag when it already exists. Defaults to `false`.
 - `remove_on_delete` (Boolean) Delete the target image from the destination registry when this resource is destroyed. Requires destination delete permission. Defaults to `false`.
 - `revision` (String) Change this value to re-copy the image when a source tag is updated or credentials rotate.
 - `source_password` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Optional source registry password or access token. Accepts an ephemeral `azutils_token.token`; never stored in state.

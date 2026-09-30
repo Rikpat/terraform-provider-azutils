@@ -2,20 +2,20 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/containers/azcontainerregistry"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerregistry/armcontainerregistry"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
-	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -26,16 +26,18 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
 const acrTokenUsername = "00000000-0000-0000-0000-000000000000"
 
 var (
-	registryHostPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9.-]*(?::[0-9]+)?$`)
-	acrHostPattern      = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]*\.azurecr\.(io|cn|us)$`)
-	imageRepoPattern    = `[a-z0-9]+(?:[._-]+[a-z0-9]+)*(?:/[a-z0-9]+(?:[._-]+[a-z0-9]+)*)*`
-	sourceImagePattern  = regexp.MustCompile(`^` + imageRepoPattern + `(?::[\w][\w.-]{0,127}|@sha256:[a-f0-9]{64})$`)
-	targetImagePattern  = regexp.MustCompile(`^` + imageRepoPattern + `:[\w][\w.-]{0,127}$`)
+	registryHostPattern  = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9.-]*(?::[0-9]+)?$`)
+	acrHostPattern       = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]*\.azurecr\.(io|cn|us)$`)
+	acrResourceIDPattern = regexp.MustCompile(`(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.ContainerRegistry/registries/[a-zA-Z0-9-]+$`)
+	imageRepoPattern     = `[a-z0-9]+(?:[._-]+[a-z0-9]+)*(?:/[a-z0-9]+(?:[._-]+[a-z0-9]+)*)*`
+	sourceImagePattern   = regexp.MustCompile(`^` + imageRepoPattern + `(?::[\w][\w.-]{0,127}|@sha256:[a-f0-9]{64})$`)
+	targetImagePattern   = regexp.MustCompile(`^` + imageRepoPattern + `:[\w][\w.-]{0,127}$`)
 )
 
 var _ resource.Resource = &acrImportImageResource{}
@@ -46,19 +48,27 @@ func NewACRImportImageResource() resource.Resource {
 }
 
 type acrImportImageResource struct {
-	credential *azidentity.ChainedTokenCredential
+	providerData *configuredProviderData
+}
+
+type targetRegistry struct {
+	id          *arm.ResourceID
+	loginServer string
+	management  *armcontainerregistry.RegistriesClient
+	data        *azcontainerregistry.Client
 }
 
 type acrImportImageModel struct {
-	ID             types.String `tfsdk:"id"`
-	SourceRegistry types.String `tfsdk:"source_registry"`
-	SourceImage    types.String `tfsdk:"source_image"`
-	SourceUsername types.String `tfsdk:"source_username"`
-	SourcePassword types.String `tfsdk:"source_password"`
-	TargetRegistry types.String `tfsdk:"target_registry"`
-	TargetImage    types.String `tfsdk:"target_image"`
-	RemoveOnDelete types.Bool   `tfsdk:"remove_on_delete"`
-	Revision       types.String `tfsdk:"revision"`
+	ID               types.String `tfsdk:"id"`
+	SourceRegistry   types.String `tfsdk:"source_registry"`
+	SourceImage      types.String `tfsdk:"source_image"`
+	SourceUsername   types.String `tfsdk:"source_username"`
+	SourcePassword   types.String `tfsdk:"source_password"`
+	TargetRegistryID types.String `tfsdk:"target_registry_id"`
+	TargetImage      types.String `tfsdk:"target_image"`
+	Force            types.Bool   `tfsdk:"force"`
+	RemoveOnDelete   types.Bool   `tfsdk:"remove_on_delete"`
+	Revision         types.String `tfsdk:"revision"`
 }
 
 func (r *acrImportImageResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -68,7 +78,7 @@ func (r *acrImportImageResource) Metadata(_ context.Context, req resource.Metada
 func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	replace := []planmodifier.String{stringplanmodifier.RequiresReplace()}
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Copies one tagged image into an Azure Container Registry by pulling and pushing through the Terraform provider. Requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-copies it if missing. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.",
+		MarkdownDescription: "Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -108,12 +118,12 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 					stringvalidator.LengthAtLeast(1),
 				},
 			},
-			"target_registry": schema.StringAttribute{
+			"target_registry_id": schema.StringAttribute{
 				Required:            true,
-				MarkdownDescription: "Destination Azure Container Registry login host without a scheme, for example `example.azurecr.io`.",
+				MarkdownDescription: "Azure resource ID of the target registry.",
 				PlanModifiers:       replace,
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(acrHostPattern, "must be an Azure Container Registry login host without a scheme or path"),
+					stringvalidator.RegexMatches(acrResourceIDPattern, "must be an Azure Container Registry resource ID"),
 				},
 			},
 			"target_image": schema.StringAttribute{
@@ -122,6 +132,15 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 				PlanModifiers:       replace,
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(targetImagePattern, "must include a repository and an explicit tag"),
+				},
+			},
+			"force": schema.BoolAttribute{
+				Optional:            true,
+				Computed:            true,
+				Default:             booldefault.StaticBool(false),
+				MarkdownDescription: "Overwrite the target tag when it already exists. Defaults to `false`.",
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.RequiresReplace(),
 				},
 			},
 			"remove_on_delete": schema.BoolAttribute{
@@ -147,13 +166,13 @@ func (r *acrImportImageResource) Configure(_ context.Context, req resource.Confi
 		return
 	}
 
-	credential, ok := req.ProviderData.(*azidentity.ChainedTokenCredential)
+	providerData, ok := req.ProviderData.(*configuredProviderData)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected Resource Configure Type", fmt.Sprintf("Expected *azidentity.ChainedTokenCredential, got: %T. Please report this issue to the provider developers.", req.ProviderData))
+		resp.Diagnostics.AddError("Unexpected Resource Configure Type", fmt.Sprintf("Expected *configuredProviderData, got: %T. Please report this issue to the provider developers.", req.ProviderData))
 		return
 	}
 
-	r.credential = credential
+	r.providerData = providerData
 }
 
 func (r *acrImportImageResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -162,99 +181,149 @@ func (r *acrImportImageResource) Create(ctx context.Context, req resource.Create
 		return
 	}
 
-	destination := data.TargetRegistry.ValueString()
-	if err := r.copyImage(ctx, destination, data); err != nil {
-		resp.Diagnostics.AddError("Could not copy image into ACR", err.Error())
+	target, err := r.targetRegistry(ctx, data.TargetRegistryID.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Could not configure target registry", err.Error())
 		return
 	}
+	parameters := importImageParameters(data)
+	if err := r.importImage(ctx, target, parameters); err != nil {
+		if !isImportRateLimited(err) {
+			resp.Diagnostics.AddError("Could not import image into ACR", err.Error())
+			return
+		}
+		tflog.Warn(ctx, "ACR server-side import was rate limited; copying image through the provider")
+		if fallbackErr := r.copyImage(ctx, target, parameters); fallbackErr != nil {
+			resp.Diagnostics.AddError("Could not import image into ACR", fmt.Sprintf("Server-side import failed due to rate limiting: %s; local copy fallback failed: %s", err, fallbackErr))
+			return
+		}
+	}
 
-	data.ID = types.StringValue(destination + "/" + data.TargetImage.ValueString())
+	data.ID = types.StringValue(data.TargetRegistryID.ValueString() + "/" + data.TargetImage.ValueString())
 	data.SourcePassword = types.StringNull()
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
-func (r *acrImportImageResource) copyImage(ctx context.Context, destination string, data acrImportImageModel) error {
-	sourceRef, err := name.ParseReference(data.SourceRegistry.ValueString() + "/" + data.SourceImage.ValueString())
+func (r *acrImportImageResource) targetRegistry(ctx context.Context, resourceID string) (*targetRegistry, error) {
+	registryID, err := arm.ParseResourceID(resourceID)
 	if err != nil {
-		return fmt.Errorf("parse source image: %w", err)
+		return nil, fmt.Errorf("parse resource ID: %w", err)
 	}
-	targetRef, err := name.ParseReference(destination + "/" + data.TargetImage.ValueString())
+	clientOptions := &arm.ClientOptions{ClientOptions: policy.ClientOptions{Cloud: r.providerData.cloud}}
+	management, err := armcontainerregistry.NewRegistriesClient(registryID.SubscriptionID, r.providerData.credential, clientOptions)
 	if err != nil {
-		return fmt.Errorf("parse target image: %w", err)
+		return nil, fmt.Errorf("configure management client: %w", err)
+	}
+	registry, err := management.Get(ctx, registryID.ResourceGroupName, registryID.Name, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get registry: %w", err)
+	}
+	if registry.Properties == nil || registry.Properties.LoginServer == nil || *registry.Properties.LoginServer == "" {
+		return nil, fmt.Errorf("registry has no login server")
+	}
+	loginServer := *registry.Properties.LoginServer
+	dataClient, err := azcontainerregistry.NewClient("https://"+loginServer, r.providerData.credential, &azcontainerregistry.ClientOptions{
+		ClientOptions: azcore.ClientOptions{Cloud: r.providerData.cloud},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configure data client: %w", err)
+	}
+	return &targetRegistry{id: registryID, loginServer: loginServer, management: management, data: dataClient}, nil
+}
+
+func (r *acrImportImageResource) importImage(ctx context.Context, target *targetRegistry, parameters armcontainerregistry.ImportImageParameters) error {
+
+	poller, err := target.management.BeginImportImage(ctx, target.id.ResourceGroupName, target.id.Name, parameters, nil)
+	if err != nil {
+		return err
+	}
+	_, err = poller.PollUntilDone(ctx, nil)
+	return err
+}
+
+func importImageParameters(data acrImportImageModel) armcontainerregistry.ImportImageParameters {
+	sourceRegistry := data.SourceRegistry.ValueString()
+	sourceImage := data.SourceImage.ValueString()
+	targetImage := data.TargetImage.ValueString()
+	mode := armcontainerregistry.ImportModeNoForce
+	if data.Force.ValueBool() {
+		mode = armcontainerregistry.ImportModeForce
+	}
+	parameters := armcontainerregistry.ImportImageParameters{
+		Source: &armcontainerregistry.ImportSource{
+			RegistryURI: &sourceRegistry,
+			SourceImage: &sourceImage,
+		},
+		TargetTags: []*string{&targetImage},
+		Mode:       &mode,
+	}
+	if !data.SourcePassword.IsNull() && data.SourcePassword.ValueString() != "" {
+		password := data.SourcePassword.ValueString()
+		parameters.Source.Credentials = &armcontainerregistry.ImportSourceCredentials{Password: &password}
+		if !data.SourceUsername.IsNull() {
+			username := data.SourceUsername.ValueString()
+			parameters.Source.Credentials.Username = &username
+		}
+	}
+	return parameters
+}
+
+func isImportRateLimited(err error) bool {
+	var responseErr *azcore.ResponseError
+	if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "toomanyrequests") || strings.Contains(message, "too many requests") || strings.Contains(message, "rate limit") || strings.Contains(message, "rate_limit") || strings.Contains(message, "http 429")
+}
+
+func (r *acrImportImageResource) copyImage(ctx context.Context, target *targetRegistry, parameters armcontainerregistry.ImportImageParameters) error {
+	targetImage := *parameters.TargetTags[0]
+	if parameters.Mode == nil || *parameters.Mode != armcontainerregistry.ImportModeForce {
+		repository, tag, _ := strings.Cut(targetImage, ":")
+		_, err := target.data.GetTagProperties(ctx, repository, tag, nil)
+		var responseErr *azcore.ResponseError
+		notFound := errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusNotFound
+		if err == nil {
+			return fmt.Errorf("target tag %q already exists; set force = true to overwrite it", targetImage)
+		}
+		if !notFound {
+			return fmt.Errorf("check target tag: %w", err)
+		}
 	}
 
 	sourceAuth := authn.Anonymous
-	if !data.SourcePassword.IsNull() && data.SourcePassword.ValueString() != "" {
-		password := data.SourcePassword.ValueString()
-		username := data.SourceUsername.ValueString()
-		if username == "" && isACRRegistry(data.SourceRegistry.ValueString()) {
-			password, err = exchangeACRToken(ctx, http.DefaultClient, "https://"+data.SourceRegistry.ValueString(), password)
+	sourceRegistry := *parameters.Source.RegistryURI
+	if parameters.Source.Credentials != nil && parameters.Source.Credentials.Password != nil {
+		password := *parameters.Source.Credentials.Password
+		username := ""
+		if parameters.Source.Credentials.Username != nil {
+			username = *parameters.Source.Credentials.Username
+		}
+		if username == "" && acrHostPattern.MatchString(sourceRegistry) {
+			sourceAuthenticator, err := r.acrAuthenticator(ctx, sourceRegistry, password)
 			if err != nil {
 				return fmt.Errorf("authenticate source registry: %w", err)
 			}
-			username = acrTokenUsername
+			sourceAuth = sourceAuthenticator
+		} else {
+			sourceAuth = &authn.Basic{Username: username, Password: password}
 		}
-		sourceAuth = &authn.Basic{Username: username, Password: password}
 	}
 
-	destinationAuth, err := r.destinationAuth(ctx, destination)
+	destinationAuth, err := r.destinationAuth(ctx, target.loginServer)
 	if err != nil {
 		return fmt.Errorf("authenticate destination registry: %w", err)
 	}
+	sourceRef, err := name.ParseReference(sourceRegistry + "/" + *parameters.Source.SourceImage)
+	if err != nil {
+		return fmt.Errorf("parse source image: %w", err)
+	}
+	targetRef, err := name.ParseReference(target.loginServer + "/" + targetImage)
+	if err != nil {
+		return fmt.Errorf("parse target image: %w", err)
+	}
 	return transferImage(ctx, sourceRef, targetRef, sourceAuth, destinationAuth)
-}
-
-func isACRRegistry(registry string) bool {
-	_, err := acrManagementScope(registry)
-	return err == nil
-}
-
-func exchangeACRToken(ctx context.Context, client *http.Client, registryURL, aadToken string) (string, error) {
-	registry, err := url.Parse(registryURL)
-	if err != nil || registry.Scheme != "https" || registry.Host == "" {
-		return "", fmt.Errorf("invalid ACR URL %q", registryURL)
-	}
-	form := url.Values{
-		"grant_type":   {"access_token"},
-		"service":      {registry.Host},
-		"access_token": {aadToken},
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, registryURL+"/oauth2/exchange", strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", err
-	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := client.Do(request)
-	if err != nil {
-		return "", err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ACR token exchange returned HTTP %d", response.StatusCode)
-	}
-	var result struct {
-		RefreshToken string `json:"refresh_token"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		return "", err
-	}
-	if result.RefreshToken == "" {
-		return "", fmt.Errorf("ACR token exchange returned no refresh token")
-	}
-	return result.RefreshToken, nil
-}
-
-func acrManagementScope(registry string) (string, error) {
-	switch {
-	case strings.HasSuffix(registry, ".azurecr.io"):
-		return "https://management.azure.com/.default", nil
-	case strings.HasSuffix(registry, ".azurecr.cn"):
-		return "https://management.chinacloudapi.cn/.default", nil
-	case strings.HasSuffix(registry, ".azurecr.us"):
-		return "https://management.usgovcloudapi.net/.default", nil
-	default:
-		return "", fmt.Errorf("unsupported ACR login server %q", registry)
-	}
 }
 
 func transferImage(ctx context.Context, sourceRef, targetRef name.Reference, sourceAuth, targetAuth authn.Authenticator) error {
@@ -290,74 +359,53 @@ func (r *acrImportImageResource) Read(ctx context.Context, req resource.ReadRequ
 		return
 	}
 
-	loginServer := data.TargetRegistry.ValueString()
-	ref, err := name.ParseReference(loginServer + "/" + data.TargetImage.ValueString())
+	target, err := r.targetRegistry(ctx, data.TargetRegistryID.ValueString())
 	if err != nil {
-		resp.Diagnostics.AddError("Invalid target image", err.Error())
+		resp.Diagnostics.AddError("Could not configure target registry", err.Error())
 		return
 	}
-	auth, err := r.destinationAuth(ctx, loginServer)
+	repository, tag, _ := strings.Cut(data.TargetImage.ValueString(), ":")
+	props, err := target.data.GetTagProperties(ctx, repository, tag, nil)
 	if err != nil {
-		resp.Diagnostics.AddError("Could not authenticate to destination registry", err.Error())
-		return
-	}
-	exists, err := imageExists(ctx, ref, auth)
-	if err != nil {
+		var responseErr *azcore.ResponseError
+		if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusNotFound {
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("Could not check target image", err.Error())
 		return
 	}
-	if !exists {
+	if props.Tag == nil || props.Tag.Digest == nil || *props.Tag.Digest == "" {
 		resp.State.RemoveResource(ctx)
 	}
 }
 
 func (r *acrImportImageResource) destinationAuth(ctx context.Context, loginServer string) (authn.Authenticator, error) {
-	scope, err := acrManagementScope(loginServer)
+	scopes := []string{r.providerData.cloud.Services[azcontainerregistry.ServiceName].Audience + "/.default"}
+	token, err := r.providerData.credential.GetToken(ctx, policy.TokenRequestOptions{Scopes: scopes})
 	if err != nil {
 		return nil, err
 	}
-	token, err := r.credential.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{scope}})
-	if err != nil {
-		return nil, err
-	}
-	refreshToken, err := exchangeACRToken(ctx, http.DefaultClient, "https://"+loginServer, token.Token)
-	if err != nil {
-		return nil, err
-	}
-	return &authn.Basic{Username: acrTokenUsername, Password: refreshToken}, nil
+	return r.acrAuthenticator(ctx, loginServer, token.Token)
 }
 
-func imageExists(ctx context.Context, ref name.Reference, auth authn.Authenticator) (bool, error) {
-	_, err := remote.Head(ref, remote.WithContext(ctx), remote.WithAuth(auth))
-	if err == nil {
-		return true, nil
-	}
-	var registryErr *transport.Error
-	if errors.As(err, &registryErr) && registryErr.StatusCode == http.StatusNotFound {
-		return false, nil
-	}
-	return false, err
-}
-
-func deleteImage(ctx context.Context, ref name.Reference, auth authn.Authenticator) error {
-	options := []remote.Option{remote.WithContext(ctx), remote.WithAuth(auth)}
-	descriptor, err := remote.Head(ref, options...)
-	var registryErr *transport.Error
-	if errors.As(err, &registryErr) && registryErr.StatusCode == http.StatusNotFound {
-		return nil
-	}
+func (r *acrImportImageResource) acrAuthenticator(ctx context.Context, loginServer, aadToken string) (authn.Authenticator, error) {
+	client, err := azcontainerregistry.NewAuthenticationClient("https://"+loginServer, &azcontainerregistry.AuthenticationClientOptions{
+		ClientOptions: azcore.ClientOptions{Cloud: r.providerData.cloud},
+	})
 	if err != nil {
-		return fmt.Errorf("resolve target image digest: %w", err)
+		return nil, err
 	}
-
-	digestRef := ref.Context().Digest(descriptor.Digest.String())
-	if err := remote.Delete(digestRef, options...); err != nil {
-		if errors.As(err, &registryErr) && registryErr.StatusCode == http.StatusNotFound {
-			return nil
-		}
-		return fmt.Errorf("delete target image digest %s: %w", descriptor.Digest, err)
+	response, err := client.ExchangeAADAccessTokenForACRRefreshToken(ctx, azcontainerregistry.PostContentSchemaGrantTypeAccessToken, loginServer, &azcontainerregistry.AuthenticationClientExchangeAADAccessTokenForACRRefreshTokenOptions{
+		AccessToken: &aadToken,
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if response.RefreshToken == nil || *response.RefreshToken == "" {
+		return nil, fmt.Errorf("ACR token exchange returned no refresh token")
+	}
+	return &authn.Basic{Username: acrTokenUsername, Password: *response.RefreshToken}, nil
 }
 
 func (r *acrImportImageResource) Update(_ context.Context, _ resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -373,18 +421,17 @@ func (r *acrImportImageResource) Delete(ctx context.Context, req resource.Delete
 		return
 	}
 
-	loginServer := data.TargetRegistry.ValueString()
-	ref, err := name.ParseReference(loginServer + "/" + data.TargetImage.ValueString())
+	target, err := r.targetRegistry(ctx, data.TargetRegistryID.ValueString())
 	if err != nil {
-		resp.Diagnostics.AddError("Invalid target image", err.Error())
+		resp.Diagnostics.AddError("Could not configure target registry", err.Error())
 		return
 	}
-	auth, err := r.destinationAuth(ctx, loginServer)
-	if err != nil {
-		resp.Diagnostics.AddError("Could not authenticate to destination registry", err.Error())
-		return
-	}
-	if err := deleteImage(ctx, ref, auth); err != nil {
+	repository, tag, _ := strings.Cut(data.TargetImage.ValueString(), ":")
+	if _, err := target.data.DeleteTag(ctx, repository, tag, nil); err != nil {
+		var responseErr *azcore.ResponseError
+		if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusNotFound {
+			return
+		}
 		resp.Diagnostics.AddError("Could not delete target image", err.Error())
 	}
 }

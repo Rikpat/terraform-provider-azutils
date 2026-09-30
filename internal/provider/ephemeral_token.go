@@ -70,17 +70,17 @@ func (d *TokenEphemeralResource) Configure(ctx context.Context, req ephemeral.Co
 		return
 	}
 
-	credential, ok := req.ProviderData.(*azidentity.ChainedTokenCredential)
+	providerData, ok := req.ProviderData.(*configuredProviderData)
 
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Ephemeral Resource Configure Type",
-			fmt.Sprintf("Expected *azidentity.ChainedTokenCredential, got: %T. Please report this issue to the provider developers.", req.ProviderData),
+			fmt.Sprintf("Expected *configuredProviderData, got: %T. Please report this issue to the provider developers.", req.ProviderData),
 		)
 		return
 	}
 
-	d.credential = credential
+	d.credential = providerData.credential
 }
 
 func (r *TokenEphemeralResource) Open(ctx context.Context, req ephemeral.OpenRequest, resp *ephemeral.OpenResponse) {

@@ -66,16 +66,16 @@ func (r *postgresqlEntraIDUserResource) Configure(_ context.Context, req resourc
 		return
 	}
 
-	credential, ok := req.ProviderData.(*azidentity.ChainedTokenCredential)
+	providerData, ok := req.ProviderData.(*configuredProviderData)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *azidentity.ChainedTokenCredential, got: %T. Please report this issue to the provider developers.", req.ProviderData),
+			fmt.Sprintf("Expected *configuredProviderData, got: %T. Please report this issue to the provider developers.", req.ProviderData),
 		)
 		return
 	}
 
-	r.credential = credential
+	r.credential = providerData.credential
 }
 
 // Schema defines the schema for the resource.
