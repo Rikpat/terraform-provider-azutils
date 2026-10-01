@@ -17,19 +17,28 @@ Fetches a Microsoft Entra ID access token using credentials configured in this e
 
 ### Required
 
-- `credentials` (List of String) Credential types to try in order.
+- `credentials` (List of String) List of credentials to try. They will be tried in the specified order. 
+	
+	Supported types are: 
+	- environment_credential
+	- azure_pipelines_credential 
+	- workload_identity_credential
+	- managed_identity_credential
+	- azure_cli_credential
+	- client_secret_credential
+	- client_certificate_credential
 - `scopes` (Set of String) Permission scopes required for the token.
 
 ### Optional
 
-- `azure_pipelines_credential` (Attributes) (see [below for nested schema](#nestedatt--azure_pipelines_credential))
+- `azure_pipelines_credential` (Attributes) Configuration block for Azure Pipelines Credential. If using TerraformTask@5, no configuration needed unless you want to use different service connection than used for terraform. If using AzureCLI@2 or AzurePowershell@5, you need to also set SYSTEM_ACCESSTOKEN env variable, or provide access token as terraform variable. (see [below for nested schema](#nestedatt--azure_pipelines_credential))
 - `claims` (String) Additional claims required by a conditional access policy.
-- `client_certificate_credential` (Attributes) (see [below for nested schema](#nestedatt--client_certificate_credential))
-- `client_secret_credential` (Attributes) (see [below for nested schema](#nestedatt--client_secret_credential))
-- `cloud` (String) Cloud environment to target. Possible values are `AzurePublic` (default), `AzureGovernment`, and `AzureChina`.
+- `client_certificate_credential` (Attributes) Configuration for a client certificate credential. All properties (except password in case of unencrypted certificate) are required, as there's already environment_credential that provides same functionality with env variables. (see [below for nested schema](#nestedatt--client_certificate_credential))
+- `client_secret_credential` (Attributes) Configuration for a client secret credential. All properties are required, as there's already environment_credential that provides same functionality with env variables. (see [below for nested schema](#nestedatt--client_secret_credential))
+- `cloud` (String) Cloud environment to target. Possible values are: ***AzurePublic*** (default), *AzureGovernment*, *AzureChina*
 - `enable_cae` (Boolean) Enable Continuous Access Evaluation.
-- `managed_identity_credential` (Attributes) (see [below for nested schema](#nestedatt--managed_identity_credential))
-- `workload_identity_credential` (Attributes) (see [below for nested schema](#nestedatt--workload_identity_credential))
+- `managed_identity_credential` (Attributes) Configuration for Managed Identity credential (optional `client_id` for user-assigned identity). (see [below for nested schema](#nestedatt--managed_identity_credential))
+- `workload_identity_credential` (Attributes) Configuration for workload identity credential. You can provide custom `client_id` and `tenant_id` if using multiple workload identities on single pod. (see [below for nested schema](#nestedatt--workload_identity_credential))
 
 ### Read-Only
 
@@ -40,10 +49,10 @@ Fetches a Microsoft Entra ID access token using credentials configured in this e
 
 Optional:
 
-- `client_id` (String)
-- `service_connection_id` (String)
-- `system_access_token` (String, Sensitive)
-- `tenant_id` (String)
+- `client_id` (String) Optional client_id if it's different from used service connection (*ARM_CLIENT_ID* or *AZURE_CLIENT_ID*)
+- `service_connection_id` (String) Optional Azure DevOps Service Connection ID, if it's different from used service connection (*ARM_OIDC_AZURE_SERVICE_CONNECTION_ID* or *AZURESUBSCRIPTION_SERVICE_CONNECTION_ID*)
+- `system_access_token` (String, Sensitive) Optional OIDC request token, if not using Terraform@5 task, or not setting *SYSTEM_ACCESSTOKEN* env variable
+- `tenant_id` (String) Optional tenant_id if it's different from used service connection (*ARM_TENANT_ID* or *AZURE_TENANT_ID*)
 
 
 <a id="nestedatt--client_certificate_credential"></a>
@@ -51,13 +60,13 @@ Optional:
 
 Required:
 
-- `certificate_path` (String)
-- `client_id` (String)
-- `tenant_id` (String)
+- `certificate_path` (String) Path to certificate used for authentication. Can be relative to current working directory (terraform root).
+- `client_id` (String) Client ID of the service principal
+- `tenant_id` (String) Tenant ID of the service principal
 
 Optional:
 
-- `certificate_password` (String, Sensitive)
+- `certificate_password` (String, Sensitive) Password to certificate file, if used.
 
 
 <a id="nestedatt--client_secret_credential"></a>
@@ -65,9 +74,9 @@ Optional:
 
 Required:
 
-- `client_id` (String)
-- `client_secret` (String, Sensitive)
-- `tenant_id` (String)
+- `client_id` (String) Client ID of the service principal
+- `client_secret` (String, Sensitive) Client Secret of the service principal
+- `tenant_id` (String) Tenant ID of the service principal
 
 
 <a id="nestedatt--managed_identity_credential"></a>
@@ -75,7 +84,7 @@ Required:
 
 Optional:
 
-- `client_id` (String)
+- `client_id` (String) Optional override of client_id, if using user-assigned identity
 
 
 <a id="nestedatt--workload_identity_credential"></a>
@@ -83,5 +92,5 @@ Optional:
 
 Optional:
 
-- `client_id` (String)
-- `tenant_id` (String)
+- `client_id` (String) Optional override of client_id, if not using the identity specified in service account annotations (in *AZURE_CLIENT_ID* env variable)
+- `tenant_id` (String) Optional override of tenant_id, if not using the identity specified in service account annotations (in *AZURE_TENANT_ID* env variable)
