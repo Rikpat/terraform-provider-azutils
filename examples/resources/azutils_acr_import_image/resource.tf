@@ -1,5 +1,5 @@
 ephemeral "azutils_token" "source" {
-  scopes = ["https://management.azure.com/.default"]
+  scopes = ["https://containerregistry.azure.com/.default"]
 }
 
 resource "azutils_acr_import_image" "example" {

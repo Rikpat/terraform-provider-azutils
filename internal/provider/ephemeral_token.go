@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -91,26 +93,31 @@ func (r *TokenEphemeralResource) Open(ctx context.Context, req ephemeral.OpenReq
 		return
 	}
 
-	// Parse scopes
-	scopes := make([]string, 0, len(data.Scopes.Elements()))
-	diags := data.Scopes.ElementsAs(ctx, &scopes, false)
-	if resp.Diagnostics.Append(diags...); diags.HasError() {
+	token, diags := fetchToken(ctx, r.credential, data.Claims, data.EnableCAE, data.Scopes)
+	if resp.Diagnostics.Append(diags...); resp.Diagnostics.HasError() {
 		return
 	}
 
-	token, err := r.credential.GetToken(ctx, policy.TokenRequestOptions{
-		Claims:    data.Claims.ValueString(),
+	data.Token = types.StringValue(token)
+	resp.Diagnostics.Append(resp.Result.Set(ctx, &data)...)
+}
+
+func fetchToken(ctx context.Context, credential azcore.TokenCredential, claims types.String, enableCAE types.Bool, scopeSet types.Set) (string, diag.Diagnostics) {
+	scopes := make([]string, 0, len(scopeSet.Elements()))
+	diags := scopeSet.ElementsAs(ctx, &scopes, false)
+	if diags.HasError() {
+		return "", diags
+	}
+
+	token, err := credential.GetToken(ctx, policy.TokenRequestOptions{
+		Claims:    claims.ValueString(),
 		Scopes:    scopes,
-		EnableCAE: data.EnableCAE.ValueBool(),
+		EnableCAE: enableCAE.ValueBool(),
 	})
 
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to get token", err.Error())
-		return
+		diags.AddError("Unable to get token", err.Error())
+		return "", diags
 	}
-
-	data.Token = types.StringValue(token.Token)
-
-	// Save data into ephemeral result data
-	resp.Diagnostics.Append(resp.Result.Set(ctx, &data)...)
+	return token.Token, diags
 }

@@ -5,44 +5,43 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
-	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
+	"github.com/hashicorp/terraform-plugin-framework/ephemeral/schema"
 	"github.com/hashicorp/terraform-plugin-framework/path"
-	"github.com/hashicorp/terraform-plugin-framework/provider"
-	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/hashicorp/terraform-plugin-log/tflog"
 	internalvalidator "github.com/rikpat/terraform-provider-azutils/internal/validator"
 )
 
-var _ provider.Provider = &AzUtilsProvider{}
-var _ provider.ProviderWithEphemeralResources = &AzUtilsProvider{}
+var _ ephemeral.EphemeralResource = &IndependentTokenEphemeralResource{}
 
-// AzUtilsProvider defines the provider implementation.
-type AzUtilsProvider struct {
-	// version is set to the provider version on release, "dev" when the
-	// provider is built and ran locally, and "test" when running acceptance
-	// testing.
-	version string
+func NewIndependentTokenEphemeralResource() ephemeral.EphemeralResource {
+	return &IndependentTokenEphemeralResource{}
 }
 
-func (p *AzUtilsProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
-	resp.TypeName = "azutils"
-	resp.Version = p.version
+type IndependentTokenEphemeralResource struct{}
+
+type IndependentTokenEphemeralResourceModel struct {
+	Cloud                       types.String `tfsdk:"cloud"`
+	Credentials                 types.List   `tfsdk:"credentials"`
+	AzurePipelinesCredential    types.Object `tfsdk:"azure_pipelines_credential"`
+	ClientSecretCredential      types.Object `tfsdk:"client_secret_credential"`
+	ClientCertificateCredential types.Object `tfsdk:"client_certificate_credential"`
+	ManagedIdentityCredential   types.Object `tfsdk:"managed_identity_credential"`
+	WorkloadIdentityCredential  types.Object `tfsdk:"workload_identity_credential"`
+	Claims                      types.String `tfsdk:"claims"`
+	EnableCAE                   types.Bool   `tfsdk:"enable_cae"`
+	Scopes                      types.Set    `tfsdk:"scopes"`
+	Token                       types.String `tfsdk:"token"`
 }
 
-// Provider configuration is primarily about selecting and configuring credential sources.
-func (p *AzUtilsProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
+func (r *IndependentTokenEphemeralResource) Metadata(_ context.Context, req ephemeral.MetadataRequest, resp *ephemeral.MetadataResponse) {
+	resp.TypeName = req.ProviderTypeName + "_independent_token"
+}
+
+func (r *IndependentTokenEphemeralResource) Schema(_ context.Context, _ ephemeral.SchemaRequest, resp *ephemeral.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: `
-Provider used for authenticating with resources supporting EntraID authentication.
-
-Main usage is generating a token using Azure Pipelines Workload Federation Identity in IaC pipelines and falling back to azure_cli for local testing, but supports more credential types.
-
-Most credentials have options like selecting client_id and tenant_id, except for *environment* and *azure_cli* credentials which take all the options from external sources.
-		`,
+		Description: "Fetches a Microsoft Entra ID access token using credentials configured in this ephemeral resource instead of provider credentials.",
 		Attributes: map[string]schema.Attribute{
 			"cloud": schema.StringAttribute{
 				MarkdownDescription: "Cloud environment to target. Possible values are: ***AzurePublic*** (default), *AzureGovernment*, *AzureChina*",
@@ -173,52 +172,52 @@ Most credentials have options like selecting client_id and tenant_id, except for
 					},
 				},
 			},
+			"claims": schema.StringAttribute{
+				Description: "Additional claims required by a conditional access policy.",
+				Optional:    true,
+			},
+			"enable_cae": schema.BoolAttribute{
+				Description: "Enable Continuous Access Evaluation.",
+				Optional:    true,
+			},
+			"scopes": schema.SetAttribute{
+				MarkdownDescription: "Permission scopes required for the token.",
+				Required:            true,
+				ElementType:         types.StringType,
+			},
+			"token": schema.StringAttribute{
+				Description: "Access token for the requested scopes.",
+				Computed:    true,
+				Sensitive:   true,
+			},
 		},
 	}
 }
 
-func (p *AzUtilsProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
-	tflog.Info(ctx, "Configuring provider")
-	// Read all env vars
-
-	var data AzUtilsProviderModel
-
+func (r *IndependentTokenEphemeralResource) Open(ctx context.Context, req ephemeral.OpenRequest, resp *ephemeral.OpenResponse) {
+	var data IndependentTokenEphemeralResourceModel
 	if resp.Diagnostics.Append(req.Config.Get(ctx, &data)...); resp.Diagnostics.HasError() {
 		return
 	}
 
-	cred, diags := setupCredentialChain(ctx, &data)
-
+	credentialData := AzUtilsProviderModel{
+		Cloud:                       data.Cloud,
+		Credentials:                 data.Credentials,
+		AzurePipelinesCredential:    data.AzurePipelinesCredential,
+		ClientSecretCredential:      data.ClientSecretCredential,
+		ClientCertificateCredential: data.ClientCertificateCredential,
+		ManagedIdentityCredential:   data.ManagedIdentityCredential,
+		WorkloadIdentityCredential:  data.WorkloadIdentityCredential,
+	}
+	providerData, diags := setupCredentialChain(ctx, &credentialData)
 	if resp.Diagnostics.Append(diags...); resp.Diagnostics.HasError() {
 		return
 	}
 
-	resp.ResourceData = cred
-	resp.EphemeralResourceData = cred
-}
-
-func (p *AzUtilsProvider) Resources(ctx context.Context) []func() resource.Resource {
-	return []func() resource.Resource{
-		NewPostgresqlEntraIDUser,
-		NewACRImportImageResource,
+	token, tokenDiags := fetchToken(ctx, providerData.credential, data.Claims, data.EnableCAE, data.Scopes)
+	if resp.Diagnostics.Append(tokenDiags...); resp.Diagnostics.HasError() {
+		return
 	}
-}
-
-func (p *AzUtilsProvider) EphemeralResources(ctx context.Context) []func() ephemeral.EphemeralResource {
-	return []func() ephemeral.EphemeralResource{
-		NewTokenEphemeralResource,
-		NewIndependentTokenEphemeralResource,
-	}
-}
-
-func (p *AzUtilsProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return nil
-}
-
-func New(version string) func() provider.Provider {
-	return func() provider.Provider {
-		return &AzUtilsProvider{
-			version: version,
-		}
-	}
+	data.Token = types.StringValue(token)
+	resp.Diagnostics.Append(resp.Result.Set(ctx, &data)...)
 }

@@ -78,7 +78,7 @@ func (r *acrImportImageResource) Metadata(_ context.Context, req resource.Metada
 func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	replace := []planmodifier.String{stringplanmodifier.RequiresReplace()}
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.",
+		MarkdownDescription: "Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -188,13 +188,13 @@ func (r *acrImportImageResource) Create(ctx context.Context, req resource.Create
 	}
 	parameters := importImageParameters(data)
 	if err := r.importImage(ctx, target, parameters); err != nil {
-		if !isImportRateLimited(err) {
+		if !shouldFallbackToLocalCopy(err) {
 			resp.Diagnostics.AddError("Could not import image into ACR", err.Error())
 			return
 		}
-		tflog.Warn(ctx, "ACR server-side import was rate limited; copying image through the provider")
+		tflog.Warn(ctx, "ACR server-side import unavailable; copying image through the provider", map[string]any{"error": err.Error()})
 		if fallbackErr := r.copyImage(ctx, target, parameters); fallbackErr != nil {
-			resp.Diagnostics.AddError("Could not import image into ACR", fmt.Sprintf("Server-side import failed due to rate limiting: %s; local copy fallback failed: %s", err, fallbackErr))
+			resp.Diagnostics.AddError("Could not import image into ACR", fmt.Sprintf("Server-side import failed: %s; local copy fallback failed: %s", err, fallbackErr))
 			return
 		}
 	}
@@ -268,13 +268,17 @@ func importImageParameters(data acrImportImageModel) armcontainerregistry.Import
 	return parameters
 }
 
-func isImportRateLimited(err error) bool {
+func shouldFallbackToLocalCopy(err error) bool {
 	var responseErr *azcore.ResponseError
 	if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusTooManyRequests {
 		return true
 	}
 	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "toomanyrequests") || strings.Contains(message, "too many requests") || strings.Contains(message, "rate limit") || strings.Contains(message, "rate_limit") || strings.Contains(message, "http 429")
+	if strings.Contains(message, "toomanyrequests") || strings.Contains(message, "too many requests") || strings.Contains(message, "rate limit") || strings.Contains(message, "rate_limit") || strings.Contains(message, "http 429") {
+		return true
+	}
+	return strings.Contains(message, "microsoft.containerregistry/registries/importimage/action") &&
+		(strings.Contains(message, "does not have authorization") || errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusForbidden)
 }
 
 func (r *acrImportImageResource) copyImage(ctx context.Context, target *targetRegistry, parameters armcontainerregistry.ImportImageParameters) error {

@@ -3,18 +3,18 @@
 page_title: "azutils_acr_import_image Resource - azutils"
 subcategory: ""
 description: |-
-  Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set remove_on_delete to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.
+  Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set remove_on_delete to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.
 ---
 
 # azutils_acr_import_image (Resource)
 
-Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.
+Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.
 
 ## Example Usage
 
 ```terraform
 ephemeral "azutils_token" "source" {
-  scopes = ["https://management.azure.com/.default"]
+  scopes = ["https://containerregistry.azure.com/.default"]
 }
 
 resource "azutils_acr_import_image" "example" {

@@ -101,7 +101,8 @@ func TestImportImageParameters(t *testing.T) {
 	}
 }
 
-func TestIsImportRateLimited(t *testing.T) {
+func TestShouldFallbackToLocalCopy(t *testing.T) {
+	missingImportPermission := "The client 'example' does not have authorization to perform action 'Microsoft.ContainerRegistry/registries/importImage/action' over scope"
 	for _, test := range []struct {
 		err  error
 		want bool
@@ -110,11 +111,14 @@ func TestIsImportRateLimited(t *testing.T) {
 		{fmt.Errorf("import: %w", &azcore.ResponseError{StatusCode: http.StatusTooManyRequests}), true},
 		{errors.New("TOOMANYREQUESTS: pull rate limit exceeded"), true},
 		{errors.New("upstream returned HTTP 429"), true},
+		{errors.New(missingImportPermission), true},
+		{fmt.Errorf("import: %w", errors.New(missingImportPermission)), true},
 		{&azcore.ResponseError{StatusCode: http.StatusForbidden}, false},
+		{errors.New("does not have authorization to perform another action"), false},
 		{errors.New("image:429 not found"), false},
 	} {
-		if got := isImportRateLimited(test.err); got != test.want {
-			t.Errorf("isImportRateLimited(%v) = %t, want %t", test.err, got, test.want)
+		if got := shouldFallbackToLocalCopy(test.err); got != test.want {
+			t.Errorf("shouldFallbackToLocalCopy(%v) = %t, want %t", test.err, got, test.want)
 		}
 	}
 }
