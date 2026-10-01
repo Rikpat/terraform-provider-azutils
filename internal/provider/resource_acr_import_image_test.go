@@ -75,6 +75,33 @@ func TestImportImageSchemaValidators(t *testing.T) {
 	}
 }
 
+func TestParseACRImageImportID(t *testing.T) {
+	data, err := parseACRImageImportID("example.azurecr.io/team/app:v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data.ID.ValueString() != "example.azurecr.io/team/app:v1" ||
+		data.TargetRegistry.ValueString() != "example.azurecr.io" ||
+		data.TargetRepository.ValueString() != "team/app" ||
+		data.TargetTag.ValueString() != "v1" {
+		t.Fatalf("unexpected imported state: %+v", data)
+	}
+	if !data.SourceRegistry.IsNull() || !data.SourceImage.IsNull() || !data.TargetRegistryID.IsNull() || !data.TargetImage.IsNull() || data.Force.ValueBool() || data.RemoveOnDelete.ValueBool() {
+		t.Fatalf("unexpected imported defaults: %+v", data)
+	}
+
+	for _, id := range []string{
+		"example.azurecr.io/team/app",
+		"example.azurecr.io/team/app@sha256:" + strings.Repeat("a", 64),
+		"team/app:v1",
+		"docker.io/team/app:v1",
+	} {
+		if _, err := parseACRImageImportID(id); err == nil {
+			t.Errorf("parseACRImageImportID(%q) succeeded, want error", id)
+		}
+	}
+}
+
 func TestImportImageParameters(t *testing.T) {
 	base := acrImportImageModel{
 		SourceRegistry: types.StringValue("source.example.com"),

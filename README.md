@@ -39,6 +39,8 @@ The server-side import uses the target registry's ARM resource ID with the provi
 
 If the source registry rate-limits the ACR service, or the principal lacks `Microsoft.ContainerRegistry/registries/importImage/action`, the provider falls back to pulling and pushing the image directly, preserving multi-platform image indexes. The fallback needs network access from the machine running Terraform to both registry endpoints and AcrPush or equivalent ABAC repository write permission on the target ACR. For public sources without `source_password`, it pulls anonymously; configure source credentials if the source registry limits anonymous pulls from your runner.
 
+Import an existing target image with its full tagged reference, for example `terraform import azutils_acr_import_image.example example.azurecr.io/team/app:v1`. The provider stores the registry, repository, and tag outputs for refresh; source inputs are write-only and are not tracked in state.
+
 
 Main configuration is part of the provider. You can specify credential types and configuration for each credential. It uses credential chain so it will try each credential type in order until it finds one that works. This allows different credentials to be used in different environments while keeping the same resource.
 

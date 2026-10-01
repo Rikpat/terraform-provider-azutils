@@ -42,6 +42,7 @@ var (
 
 var _ resource.Resource = &acrImportImageResource{}
 var _ resource.ResourceWithConfigure = &acrImportImageResource{}
+var _ resource.ResourceWithImportState = &acrImportImageResource{}
 
 func NewACRImportImageResource() resource.Resource {
 	return &acrImportImageResource{}
@@ -64,11 +65,13 @@ type acrImportImageModel struct {
 	SourceImage      types.String `tfsdk:"source_image"`
 	SourceUsername   types.String `tfsdk:"source_username"`
 	SourcePassword   types.String `tfsdk:"source_password"`
+	TargetRegistry   types.String `tfsdk:"target_registry"`
 	TargetRegistryID types.String `tfsdk:"target_registry_id"`
+	TargetRepository types.String `tfsdk:"target_repository"`
+	TargetTag        types.String `tfsdk:"target_tag"`
 	TargetImage      types.String `tfsdk:"target_image"`
 	Force            types.Bool   `tfsdk:"force"`
 	RemoveOnDelete   types.Bool   `tfsdk:"remove_on_delete"`
-	Revision         types.String `tfsdk:"revision"`
 }
 
 func (r *acrImportImageResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -78,7 +81,7 @@ func (r *acrImportImageResource) Metadata(_ context.Context, req resource.Metada
 func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	replace := []planmodifier.String{stringplanmodifier.RequiresReplace()}
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.",
+		MarkdownDescription: "Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. Existing images can be imported into Terraform state with a full `<registry>/<repository>:<tag>` reference. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only inputs.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -86,6 +89,7 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 			},
 			"source_registry": schema.StringAttribute{
 				Required:            true,
+				WriteOnly:           true,
 				MarkdownDescription: "Source registry host, for example `example.azurecr.io` or `docker.io` (without a scheme).",
 				PlanModifiers:       replace,
 				Validators: []validator.String{
@@ -94,6 +98,7 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 			},
 			"source_image": schema.StringAttribute{
 				Required:            true,
+				WriteOnly:           true,
 				MarkdownDescription: "Source repository and tag or digest, for example `app:v1` or `app@sha256:...`.",
 				PlanModifiers:       replace,
 				Validators: []validator.String{
@@ -102,6 +107,7 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 			},
 			"source_username": schema.StringAttribute{
 				Optional:            true,
+				WriteOnly:           true,
 				MarkdownDescription: "Optional username for the source registry. For an ACR access token, omit this and set `source_password`.",
 				PlanModifiers:       replace,
 				Validators: []validator.String{
@@ -120,14 +126,27 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 			},
 			"target_registry_id": schema.StringAttribute{
 				Required:            true,
-				MarkdownDescription: "Azure resource ID of the target registry.",
-				PlanModifiers:       replace,
+				WriteOnly:           true,
+				MarkdownDescription: "Azure resource ID of the target registry. Used for Create only and never stored in state.",
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(acrResourceIDPattern, "must be an Azure Container Registry resource ID"),
 				},
 			},
+			"target_registry": schema.StringAttribute{
+				Computed:            true,
+				MarkdownDescription: "Resolved target registry login server.",
+			},
+			"target_repository": schema.StringAttribute{
+				Computed:            true,
+				MarkdownDescription: "Resolved target repository in the target registry.",
+			},
+			"target_tag": schema.StringAttribute{
+				Computed:            true,
+				MarkdownDescription: "Resolved target tag in the target registry.",
+			},
 			"target_image": schema.StringAttribute{
 				Required:            true,
+				WriteOnly:           true,
 				MarkdownDescription: "Destination repository and tag, for example `app:v1`.",
 				PlanModifiers:       replace,
 				Validators: []validator.String{
@@ -151,11 +170,6 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 				PlanModifiers: []planmodifier.Bool{
 					boolplanmodifier.RequiresReplace(),
 				},
-			},
-			"revision": schema.StringAttribute{
-				Optional:            true,
-				MarkdownDescription: "Change this value to re-copy the image when a source tag is updated or credentials rotate.",
-				PlanModifiers:       replace,
 			},
 		},
 	}
@@ -199,8 +213,17 @@ func (r *acrImportImageResource) Create(ctx context.Context, req resource.Create
 		}
 	}
 
-	data.ID = types.StringValue(data.TargetRegistryID.ValueString() + "/" + data.TargetImage.ValueString())
+	repository, tag, _ := strings.Cut(data.TargetImage.ValueString(), ":")
+	data.ID = types.StringValue(target.loginServer + "/" + repository + ":" + tag)
+	data.SourceRegistry = types.StringNull()
+	data.SourceImage = types.StringNull()
+	data.SourceUsername = types.StringNull()
 	data.SourcePassword = types.StringNull()
+	data.TargetRegistry = types.StringValue(target.loginServer)
+	data.TargetRegistryID = types.StringNull()
+	data.TargetRepository = types.StringValue(repository)
+	data.TargetTag = types.StringValue(tag)
+	data.TargetImage = types.StringNull()
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -222,13 +245,17 @@ func (r *acrImportImageResource) targetRegistry(ctx context.Context, resourceID 
 		return nil, fmt.Errorf("registry has no login server")
 	}
 	loginServer := *registry.Properties.LoginServer
-	dataClient, err := azcontainerregistry.NewClient("https://"+loginServer, r.providerData.credential, &azcontainerregistry.ClientOptions{
-		ClientOptions: azcore.ClientOptions{Cloud: r.providerData.cloud},
-	})
+	dataClient, err := r.registryDataClient(loginServer)
 	if err != nil {
 		return nil, fmt.Errorf("configure data client: %w", err)
 	}
 	return &targetRegistry{id: registryID, loginServer: loginServer, management: management, data: dataClient}, nil
+}
+
+func (r *acrImportImageResource) registryDataClient(loginServer string) (*azcontainerregistry.Client, error) {
+	return azcontainerregistry.NewClient("https://"+loginServer, r.providerData.credential, &azcontainerregistry.ClientOptions{
+		ClientOptions: azcore.ClientOptions{Cloud: r.providerData.cloud},
+	})
 }
 
 func (r *acrImportImageResource) importImage(ctx context.Context, target *targetRegistry, parameters armcontainerregistry.ImportImageParameters) error {
@@ -363,13 +390,12 @@ func (r *acrImportImageResource) Read(ctx context.Context, req resource.ReadRequ
 		return
 	}
 
-	target, err := r.targetRegistry(ctx, data.TargetRegistryID.ValueString())
+	client, err := r.registryDataClient(data.TargetRegistry.ValueString())
 	if err != nil {
-		resp.Diagnostics.AddError("Could not configure target registry", err.Error())
+		resp.Diagnostics.AddError("Could not configure target registry client", err.Error())
 		return
 	}
-	repository, tag, _ := strings.Cut(data.TargetImage.ValueString(), ":")
-	props, err := target.data.GetTagProperties(ctx, repository, tag, nil)
+	props, err := client.GetTagProperties(ctx, data.TargetRepository.ValueString(), data.TargetTag.ValueString(), nil)
 	if err != nil {
 		var responseErr *azcore.ResponseError
 		if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusNotFound {
@@ -425,17 +451,53 @@ func (r *acrImportImageResource) Delete(ctx context.Context, req resource.Delete
 		return
 	}
 
-	target, err := r.targetRegistry(ctx, data.TargetRegistryID.ValueString())
+	client, err := r.registryDataClient(data.TargetRegistry.ValueString())
 	if err != nil {
-		resp.Diagnostics.AddError("Could not configure target registry", err.Error())
+		resp.Diagnostics.AddError("Could not configure target registry client", err.Error())
 		return
 	}
-	repository, tag, _ := strings.Cut(data.TargetImage.ValueString(), ":")
-	if _, err := target.data.DeleteTag(ctx, repository, tag, nil); err != nil {
+	if _, err := client.DeleteTag(ctx, data.TargetRepository.ValueString(), data.TargetTag.ValueString(), nil); err != nil {
 		var responseErr *azcore.ResponseError
 		if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusNotFound {
 			return
 		}
 		resp.Diagnostics.AddError("Could not delete target image", err.Error())
 	}
+}
+
+func (r *acrImportImageResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	data, err := parseACRImageImportID(req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
+}
+
+func parseACRImageImportID(id string) (*acrImportImageModel, error) {
+	reference, err := name.ParseReference(id, name.StrictValidation)
+	if err != nil {
+		return nil, fmt.Errorf("expected a full image reference in the form <registry>/<repository>:<tag>: %w", err)
+	}
+	tag, ok := reference.(name.Tag)
+	if !ok {
+		return nil, fmt.Errorf("expected a tagged image reference, got %q", id)
+	}
+	if !acrHostPattern.MatchString(tag.Context().RegistryStr()) {
+		return nil, fmt.Errorf("expected an Azure Container Registry image reference, got %q", id)
+	}
+	return &acrImportImageModel{
+		ID:               types.StringValue(tag.Name()),
+		SourceRegistry:   types.StringNull(),
+		SourceImage:      types.StringNull(),
+		SourceUsername:   types.StringNull(),
+		SourcePassword:   types.StringNull(),
+		TargetRegistry:   types.StringValue(tag.Context().RegistryStr()),
+		TargetRegistryID: types.StringNull(),
+		TargetRepository: types.StringValue(tag.Context().RepositoryStr()),
+		TargetTag:        types.StringValue(tag.TagStr()),
+		TargetImage:      types.StringNull(),
+		Force:            types.BoolValue(false),
+		RemoveOnDelete:   types.BoolValue(false),
+	}, nil
 }

@@ -3,12 +3,12 @@
 page_title: "azutils_acr_import_image Resource - azutils"
 subcategory: ""
 description: |-
-  Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set remove_on_delete to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.
+  Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. Existing images can be imported into Terraform state with a full <registry>/<repository>:<tag> reference. By default, removing this resource from Terraform state does not delete the image; set remove_on_delete to delete it during destroy. Requires Terraform 1.11 or later for write-only inputs.
 ---
 
 # azutils_acr_import_image (Resource)
 
-Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only source passwords.
+Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. Existing images can be imported into Terraform state with a full `<registry>/<repository>:<tag>` reference. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only inputs.
 
 ## Example Usage
 
@@ -33,10 +33,12 @@ resource "azutils_acr_import_image" "example" {
 
 ### Required
 
-- `source_image` (String) Source repository and tag or digest, for example `app:v1` or `app@sha256:...`.
-- `source_registry` (String) Source registry host, for example `example.azurecr.io` or `docker.io` (without a scheme).
-- `target_image` (String) Destination repository and tag, for example `app:v1`.
-- `target_registry_id` (String) Azure resource ID of the target registry.
+> **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
+
+- `source_image` (String, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Source repository and tag or digest, for example `app:v1` or `app@sha256:...`.
+- `source_registry` (String, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Source registry host, for example `example.azurecr.io` or `docker.io` (without a scheme).
+- `target_image` (String, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Destination repository and tag, for example `app:v1`.
+- `target_registry_id` (String, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Azure resource ID of the target registry. Used for Create only and never stored in state.
 
 ### Optional
 
@@ -44,10 +46,12 @@ resource "azutils_acr_import_image" "example" {
 
 - `force` (Boolean) Overwrite the target tag when it already exists. Defaults to `false`.
 - `remove_on_delete` (Boolean) Delete the target image from the destination registry when this resource is destroyed. Requires destination delete permission. Defaults to `false`.
-- `revision` (String) Change this value to re-copy the image when a source tag is updated or credentials rotate.
 - `source_password` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Optional source registry password or access token. Accepts an ephemeral `azutils_token.token`; never stored in state.
-- `source_username` (String) Optional username for the source registry. For an ACR access token, omit this and set `source_password`.
+- `source_username` (String, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Optional username for the source registry. For an ACR access token, omit this and set `source_password`.
 
 ### Read-Only
 
 - `id` (String) The ID of this resource.
+- `target_registry` (String) Resolved target registry login server.
+- `target_repository` (String) Resolved target repository in the target registry.
+- `target_tag` (String) Resolved target tag in the target registry.
