@@ -71,7 +71,7 @@ type acrImportImageModel struct {
 	TargetTag        types.String `tfsdk:"target_tag"`
 	TargetImage      types.String `tfsdk:"target_image"`
 	Force            types.Bool   `tfsdk:"force"`
-	RemoveOnDelete   types.Bool   `tfsdk:"remove_on_delete"`
+	DeleteOnDestroy  types.Bool   `tfsdk:"delete_on_destroy"`
 }
 
 func (r *acrImportImageResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -81,7 +81,7 @@ func (r *acrImportImageResource) Metadata(_ context.Context, req resource.Metada
 func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	replace := []planmodifier.String{stringplanmodifier.RequiresReplace()}
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. Existing images can be imported into Terraform state with a full `<registry>/<repository>:<tag>` reference. By default, removing this resource from Terraform state does not delete the image; set `remove_on_delete` to delete it during destroy. Requires Terraform 1.11 or later for write-only inputs.",
+		MarkdownDescription: "Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. Existing images can be imported into Terraform state with a full `<registry>/<repository>:<tag>` reference. By default, removing this resource from Terraform state does not delete the image; set `delete_on_destroy` to delete it during destroy. Requires Terraform 1.11 or later for write-only inputs.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -162,7 +162,7 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 					boolplanmodifier.RequiresReplace(),
 				},
 			},
-			"remove_on_delete": schema.BoolAttribute{
+			"delete_on_destroy": schema.BoolAttribute{
 				Optional:            true,
 				Computed:            true,
 				Default:             booldefault.StaticBool(false),
@@ -447,7 +447,7 @@ func (r *acrImportImageResource) Delete(ctx context.Context, req resource.Delete
 	if resp.Diagnostics.Append(req.State.Get(ctx, &data)...); resp.Diagnostics.HasError() {
 		return
 	}
-	if !data.RemoveOnDelete.ValueBool() {
+	if !data.DeleteOnDestroy.ValueBool() {
 		return
 	}
 
@@ -498,6 +498,6 @@ func parseACRImageImportID(id string) (*acrImportImageModel, error) {
 		TargetTag:        types.StringValue(tag.TagStr()),
 		TargetImage:      types.StringNull(),
 		Force:            types.BoolValue(false),
-		RemoveOnDelete:   types.BoolValue(false),
+		DeleteOnDestroy:  types.BoolValue(false),
 	}, nil
 }

@@ -86,7 +86,7 @@ func TestParseACRImageImportID(t *testing.T) {
 		data.TargetTag.ValueString() != "v1" {
 		t.Fatalf("unexpected imported state: %+v", data)
 	}
-	if !data.SourceRegistry.IsNull() || !data.SourceImage.IsNull() || !data.TargetRegistryID.IsNull() || !data.TargetImage.IsNull() || data.Force.ValueBool() || data.RemoveOnDelete.ValueBool() {
+	if !data.SourceRegistry.IsNull() || !data.SourceImage.IsNull() || !data.TargetRegistryID.IsNull() || !data.TargetImage.IsNull() || data.Force.ValueBool() || data.DeleteOnDestroy.ValueBool() {
 		t.Fatalf("unexpected imported defaults: %+v", data)
 	}
 
