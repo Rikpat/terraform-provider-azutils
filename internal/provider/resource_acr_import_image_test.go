@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/containers/azcontainerregistry"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerregistry/armcontainerregistry"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -125,6 +129,87 @@ func TestImportImageParameters(t *testing.T) {
 	forced.Force = types.BoolValue(true)
 	if mode := importImageParameters(forced).Mode; mode == nil || *mode != armcontainerregistry.ImportModeForce {
 		t.Fatalf("force mode = %v, want %s", mode, armcontainerregistry.ImportModeForce)
+	}
+}
+
+type acrImportTestTransport func(*http.Request) (*http.Response, error)
+
+func (transport acrImportTestTransport) Do(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+type acrImportTestCredential struct{}
+
+func (acrImportTestCredential) GetToken(context.Context, policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	return azcore.AccessToken{Token: "test-token", ExpiresOn: time.Now().Add(time.Hour)}, nil
+}
+
+func TestImportImageTimeout(t *testing.T) {
+	for _, stage := range []string{"success", "begin", "poll"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx := context.Background()
+			if stage != "success" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+				defer cancel()
+			}
+			pollRequests := 0
+			client, err := armcontainerregistry.NewRegistriesClient("subscription", acrImportTestCredential{}, &arm.ClientOptions{
+				DisableRPRegistration: true,
+				ClientOptions: policy.ClientOptions{
+					Transport: acrImportTestTransport(func(request *http.Request) (*http.Response, error) {
+						deadline, ok := request.Context().Deadline()
+						if !ok || time.Until(deadline) > 5*time.Minute {
+							t.Fatal("import request does not have a deadline within five minutes")
+						}
+						if stage == "success" && time.Until(deadline) < 4*time.Minute {
+							t.Fatal("import timeout is unexpectedly shorter than five minutes")
+						}
+						if request.Method == http.MethodGet {
+							pollRequests++
+						}
+						if stage == "begin" || stage == "poll" && request.Method == http.MethodGet {
+							<-request.Context().Done()
+							return nil, request.Context().Err()
+						}
+						response := &http.Response{
+							StatusCode: http.StatusAccepted,
+							Header:     http.Header{"Azure-Asyncoperation": {"https://management.azure.com/operations/import"}},
+							Body:       io.NopCloser(strings.NewReader(`{}`)),
+							Request:    request,
+						}
+						if request.Method == http.MethodGet {
+							response.StatusCode = http.StatusOK
+							response.Body = io.NopCloser(strings.NewReader(`{"status":"Succeeded"}`))
+						}
+						return response, nil
+					}),
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			registryID, err := arm.ParseResourceID("/subscriptions/subscription/resourceGroups/group/providers/Microsoft.ContainerRegistry/registries/registry")
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := &targetRegistry{id: registryID, management: client}
+			err = (&acrImportImageResource{}).importImage(ctx, target, importImageParameters(acrImportImageModel{
+				SourceRegistry: types.StringValue("source.example.com"),
+				SourceImage:    types.StringValue("app:v1"),
+				TargetImage:    types.StringValue("app:v1"),
+			}))
+			if stage == "success" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if !errors.Is(err, context.DeadlineExceeded) || shouldFallbackToLocalCopy(err) {
+				t.Fatalf("import error = %v, want deadline exceeded without local fallback", err)
+			}
+			if stage != "begin" && pollRequests == 0 {
+				t.Fatal("import did not poll the operation")
+			}
+		})
 	}
 }
 

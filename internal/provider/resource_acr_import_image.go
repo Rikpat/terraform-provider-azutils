@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
@@ -81,7 +82,7 @@ func (r *acrImportImageResource) Metadata(_ context.Context, req resource.Metada
 func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	replace := []planmodifier.String{stringplanmodifier.RequiresReplace()}
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Imports one tagged image using the Azure Container Registry server-side import API. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. Existing images can be imported into Terraform state with a full `<registry>/<repository>:<tag>` reference. By default, removing this resource from Terraform state does not delete the image; set `delete_on_destroy` to delete it during destroy. Requires Terraform 1.11 or later for write-only inputs.",
+		MarkdownDescription: "Imports one tagged image using the Azure Container Registry server-side import API. Server-side import submission and polling have a ten-minute timeout. A timeout stops waiting but does not cancel the Azure operation. If the source registry rate-limits the ACR service or the principal lacks the ARM import action, the provider falls back to pulling and pushing the image locally. The fallback requires network access to both registries and destination push permission. Refresh checks whether the target tag exists and re-imports it if missing. Existing images can be imported into Terraform state with a full `<registry>/<repository>:<tag>` reference. By default, removing this resource from Terraform state does not delete the image; set `delete_on_destroy` to delete it during destroy. Requires Terraform 1.11 or later for write-only inputs.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -259,12 +260,16 @@ func (r *acrImportImageResource) registryDataClient(loginServer string) (*azcont
 }
 
 func (r *acrImportImageResource) importImage(ctx context.Context, target *targetRegistry, parameters armcontainerregistry.ImportImageParameters) error {
-
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
 	poller, err := target.management.BeginImportImage(ctx, target.id.ResourceGroupName, target.id.Name, parameters, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("begin ACR image import: %w", err)
 	}
 	_, err = poller.PollUntilDone(ctx, nil)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("ACR image import timed out (maximum wait 5 minutes); Azure may still complete the import: %w", err)
+	}
 	return err
 }
 
