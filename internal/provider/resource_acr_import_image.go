@@ -22,7 +22,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -132,18 +131,22 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(acrResourceIDPattern, "must be an Azure Container Registry resource ID"),
 				},
+				PlanModifiers: replace,
 			},
 			"target_registry": schema.StringAttribute{
 				Computed:            true,
 				MarkdownDescription: "Resolved target registry login server.",
+				PlanModifiers:       replace,
 			},
 			"target_repository": schema.StringAttribute{
 				Computed:            true,
 				MarkdownDescription: "Resolved target repository in the target registry.",
+				PlanModifiers:       replace,
 			},
 			"target_tag": schema.StringAttribute{
 				Computed:            true,
 				MarkdownDescription: "Resolved target tag in the target registry.",
+				PlanModifiers:       replace,
 			},
 			"target_image": schema.StringAttribute{
 				Required:            true,
@@ -159,18 +162,12 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Computed:            true,
 				Default:             booldefault.StaticBool(false),
 				MarkdownDescription: "Overwrite the target tag when it already exists. Defaults to `false`.",
-				PlanModifiers: []planmodifier.Bool{
-					boolplanmodifier.RequiresReplace(),
-				},
 			},
 			"delete_on_destroy": schema.BoolAttribute{
 				Optional:            true,
 				Computed:            true,
 				Default:             booldefault.StaticBool(false),
 				MarkdownDescription: "Delete the target image from the destination registry when this resource is destroyed. Requires destination delete permission. Defaults to `false`.",
-				PlanModifiers: []planmodifier.Bool{
-					boolplanmodifier.RequiresReplace(),
-				},
 			},
 		},
 	}
