@@ -149,9 +149,9 @@ func (r *acrImportImageResource) Schema(_ context.Context, _ resource.SchemaRequ
 				PlanModifiers:       replace,
 			},
 			"target_image": schema.StringAttribute{
-				Required:            true,
-				WriteOnly:           true,
-				MarkdownDescription: "Destination repository and tag, for example `app:v1`.",
+				Required: true,
+				// Stored in state (unlike the other inputs) so that changing the tag plans a replacement.
+				MarkdownDescription: "Destination repository and tag, for example `app:v1`. Changing it re-imports the image.",
 				PlanModifiers:       replace,
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(targetImagePattern, "must include a repository and an explicit tag"),
@@ -189,9 +189,19 @@ func (r *acrImportImageResource) Configure(_ context.Context, req resource.Confi
 
 func (r *acrImportImageResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var data acrImportImageModel
-	if resp.Diagnostics.Append(req.Config.Get(ctx, &data)...); resp.Diagnostics.HasError() {
+	if resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...); resp.Diagnostics.HasError() {
 		return
 	}
+	var config acrImportImageModel
+	if resp.Diagnostics.Append(req.Config.Get(ctx, &config)...); resp.Diagnostics.HasError() {
+		return
+	}
+	// Write-only values are null in the plan and only readable from the config.
+	data.SourceRegistry = config.SourceRegistry
+	data.SourceImage = config.SourceImage
+	data.SourceUsername = config.SourceUsername
+	data.SourcePassword = config.SourcePassword
+	data.TargetRegistryID = config.TargetRegistryID
 
 	target, err := r.targetRegistry(ctx, data.TargetRegistryID.ValueString())
 	if err != nil {
@@ -221,7 +231,6 @@ func (r *acrImportImageResource) Create(ctx context.Context, req resource.Create
 	data.TargetRegistryID = types.StringNull()
 	data.TargetRepository = types.StringValue(repository)
 	data.TargetTag = types.StringValue(tag)
-	data.TargetImage = types.StringNull()
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -409,6 +418,12 @@ func (r *acrImportImageResource) Read(ctx context.Context, req resource.ReadRequ
 	}
 	if props.Tag == nil || props.Tag.Digest == nil || *props.Tag.Digest == "" {
 		resp.State.RemoveResource(ctx)
+		return
+	}
+	// Backfill state written before target_image was persisted, to avoid a spurious replacement.
+	if data.TargetImage.IsNull() {
+		data.TargetImage = types.StringValue(data.TargetRepository.ValueString() + ":" + data.TargetTag.ValueString())
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 	}
 }
 
@@ -498,7 +513,7 @@ func parseACRImageImportID(id string) (*acrImportImageModel, error) {
 		TargetRegistryID: types.StringNull(),
 		TargetRepository: types.StringValue(tag.Context().RepositoryStr()),
 		TargetTag:        types.StringValue(tag.TagStr()),
-		TargetImage:      types.StringNull(),
+		TargetImage:      types.StringValue(tag.Context().RepositoryStr() + ":" + tag.TagStr()),
 		Force:            types.BoolValue(false),
 		DeleteOnDestroy:  types.BoolValue(false),
 	}, nil

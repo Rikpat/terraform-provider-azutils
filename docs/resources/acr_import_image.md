@@ -37,7 +37,7 @@ resource "azutils_acr_import_image" "example" {
 
 - `source_image` (String, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Source repository and tag or digest, for example `app:v1` or `app@sha256:...`.
 - `source_registry` (String, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Source registry host, for example `example.azurecr.io` or `docker.io` (without a scheme).
-- `target_image` (String, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Destination repository and tag, for example `app:v1`.
+- `target_image` (String) Destination repository and tag, for example `app:v1`. Changing it re-imports the image.
 - `target_registry_id` (String, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Azure resource ID of the target registry. Used for Create only and never stored in state.
 
 ### Optional
